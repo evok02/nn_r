@@ -1,0 +1,185 @@
+---
+title: "tereshchenko_assignment4"
+author: "Hlib Tereshchenko"
+date: "2025-05-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#Set working directory
+if (rstudioapi::isAvailable())
+  setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+#Import necessary libraries
+library(data.table)
+library(plotly)
+library(torch)
+library(ROSE)
+
+```
+
+Import and analyzing the data from CSV file
+
+```{r}
+#Convert CSV to data.table 
+dt <- fread("./data/Lecture_10_Dry_Bean_Dataset.csv")
+
+#17 vars and 13611 samples
+dim(dt)
+summary(dt)
+
+#Check if there are any NaN values
+colSums(is.na(dt)) #No noise! Perfect
+
+my_numerical_columns <- colnames(dt[, .SD, .SDcols = is.numeric])
+my_categorical_columns <- colnames(dt[, .SD, .SDcols = is.factor])
+
+scatterplots <- lapply(my_numerical_columns,
+                       function(col) {
+                         plot_ly(data   = dt,
+                                 x      = ~1:nrow(dt),
+                                 y      = ~get(col),
+                                 color  = ~Class,
+                                 colors = c("Green","Blue", "Red"),
+                                 type   = "scattergl",
+                                 mode   = "markers",
+                                 showlegend = FALSE,
+                                 marker = list(size = 3)) |>
+                           layout(yaxis = list(title = col))
+                       })
+
+subplot(scatterplots, titleY = T, nrows = 5)
+
+#We should shuffle data later
+
+boxplots <- lapply(my_numerical_columns,
+                       function(col) {
+                         plot_ly(data   = dt,
+                                 x      = ~Class,
+                                 y      = ~get(col),
+                                 color  = ~Class,
+                                 colors = c("Green","Blue", "Red"),
+                                 type   = "box",
+                                 showlegend = FALSE) |>
+                           layout(yaxis = list(title = col))
+                       })
+subplot(boxplots, titleY = T, nrows = 8)
+
+#We also need to rescale our data later
+
+
+```
+
+Preprocessing and splitting
+
+```{r}
+dt$Class <- factor(
+  dt$Class,
+  levels = c("SIRA", "SEKER", "DERMASON", "CALI", "BARBUNYA", "HOROZ", "BOMBAY"),
+  ordered = FALSE
+)
+
+#Shuffle dataset, otherwise it will cause bias
+set.seed(12345)
+dt <- dt[sample(1:nrow(dt))]
+
+#Now its better
+subplot(scatterplots, titleY = T, nrows = 5)
+
+#Splitting traininig/test sets
+idx <- sample(nrow(dt), nrow(dt) * 0.8)
+
+x_train <- as.matrix(dt[idx, 1:16])
+y_train <- as.integer(unlist(dt[idx, 17]))
+
+x_test <- as.matrix(dt[-idx, 1:16])
+y_test <- as.integer(unlist(dt[-idx, 17]))
+
+#Scale training set
+x_train_scaled <- scale(x_train)
+summary(x_train_scaled)
+
+#Scale test set
+x_test_scaled <- scale(
+  x_test,
+  center = attr(x_train_scaled, "scaled:center"),  
+  scale = attr(x_train_scaled, "scaled:scale")    
+)
+summary(x_test_scaled)
+
+#Our class variable is unbalanced
+class_counts <- table(y_train)
+class_counts
+
+#I saw in internet implementation of the class weight, using ratio.
+#I got interested and decided to implement it
+class_weights <- 1 / class_counts  # Penalize rare classes more
+class_weights <- class_weights / sum(class_weights) #Normalize
+
+#Creating class weight tensor
+class_weights_tensor <- torch_tensor(class_weights, dtype = torch_float32())
+
+#Also convert train and test sets into tensors
+# convert to tensors
+x_train_tensor <- torch_tensor(x_train_scaled, dtype = torch_float())
+y_train_tensor <- torch_tensor(y_train, dtype = torch_long())
+
+x_test_tensor <- torch_tensor(x_test_scaled, dtype = torch_float())
+y_test_tensor <- torch_tensor(y_test, dtype = torch_long())
+
+```
+
+
+Creating and training the model
+
+```{r}
+#I decide to make a little bit more complex model, cause we have more complex data set then iris, with 7 labels
+model <- nn_sequential(
+  nn_linear(16, 128),
+  nn_relu(),
+  nn_linear(128, 64),
+  nn_relu(),
+  nn_linear(64, 7)
+)
+
+# Define cost function and optimizer
+criterion <- nn_cross_entropy_loss(weight = class_weights_tensor) #Applying our weights tensor
+optimizer <- optim_adam(model$parameters, lr = 0.005) #The most optimal learning rate i could get, according to the accuracy
+
+epochs <- 300
+
+for (i in 1:epochs) {
+    optimizer$zero_grad()
+
+    # Forward pass
+    y_pred_tensor <- model(x_train_tensor)
+
+    # Compute loss
+    loss <- criterion(y_pred_tensor, y_train_tensor)
+    loss$backward()
+
+    # take a step in the opposite direction
+    optimizer$step()
+
+    if (i %% 10 == 0) {
+        winners <- y_pred_tensor$argmax(dim = 2)
+        corrects <- winners == y_train_tensor
+        accuracy <- corrects$sum()$item() / y_train_tensor$size()
+        cat("Epoch:", i,
+            "Loss", loss$item(),
+            "Accuracy", accuracy, "\n")
+    }
+}
+
+# Check on the test set
+y_pred_tensor <- model(x_test_tensor)
+y_pred <- as.array(y_pred_tensor$argmax(dim = 2))
+
+print(table(y_pred, y_test))
+cat(" Accuracy: ", sum(y_pred == y_test) / length(y_pred), "\n")
+
+#We can see that our prediction model works really well on the both train and test set (around 93% accuracy)
+```
+
